@@ -7,6 +7,9 @@ import io.ktor.client.engine.mock.respondRedirect
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import org.olcbox.app.CurrentAppInfo
 import org.olcbox.app.data.identity.DeviceIdentityProvider
@@ -257,6 +260,8 @@ class LocationsRepositoryImplTest {
             #refresh: 10m
             #color: #4A90E2
             #icon: flag-ru
+            #description: Main subscription
+            #comment: Legacy subscription comment
             #used: 10mb/10gb
             #available: 9.99gb
 
@@ -264,6 +269,7 @@ class LocationsRepositoryImplTest {
             ##name: RU-1
             ##color: #4A90E2
             ##icon: node-ru
+            ##description: Fast primary relay
             ##used: 500mb/10gb
             ##available: 9.5gb
             ##ip: 203.0.113.10
@@ -290,6 +296,7 @@ class LocationsRepositoryImplTest {
         assertEquals("RU-1", firstMetadata.name)
         assertEquals("#4A90E2", firstMetadata.color)
         assertEquals("node-ru", firstMetadata.icon)
+        assertEquals("Fast primary relay", firstMetadata.description)
         assertEquals("500mb/10gb", firstMetadata.used)
         assertEquals("9.5gb", firstMetadata.available)
         assertEquals("203.0.113.10", firstMetadata.ip)
@@ -303,6 +310,9 @@ class LocationsRepositoryImplTest {
         assertEquals("10m", subscriptionMetadata.refresh)
         assertEquals("#4A90E2", subscriptionMetadata.color)
         assertEquals("flag-ru", subscriptionMetadata.icon)
+        assertEquals("Main subscription", subscriptionMetadata.description)
+        assertEquals("Legacy subscription comment", subscriptionMetadata.comment)
+        assertEquals("Main subscription", subscriptionMetadata.displayDescription())
         assertEquals("10mb/10gb", subscriptionMetadata.used)
         assertEquals("9.99gb", subscriptionMetadata.available)
         assertEquals(10L * 60L * 1_000L, subscriptionMetadata.effectiveUpdateIntervalMs())
@@ -706,6 +716,50 @@ class LocationsRepositoryImplTest {
             source.stored?.locations?.single()
                 ?.metadata?.subscription?.allowInsecureRequests == true
         )
+    }
+
+    @Test
+    fun refreshKeepsSelectedFallbackWhenItStillExists() = runTest {
+        val url = "https://example.test/sub"
+        val key = "a".repeat(64)
+        val first = LocationEntry.from("first", LocationConfig("First", "room-first", key), subscriptionUrl = url)
+        val second = LocationEntry.from("second", LocationConfig("Second", "room-second", key), subscriptionUrl = url)
+        val source = FakeLocationsDataSource(stored = LocationBundleV4(
+            activeLocationId = "second", locations = listOf(first, second)
+        ))
+        val repository = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            respond("olcrtc://wbstream?vp8channel@room-first#$key\nolcrtc://wbstream?vp8channel@room-second#$key")
+        }))
+        assertEquals(1, repository.refreshSubscription(url))
+        assertEquals("second", repository.getActiveLocationId())
+    }
+
+    @Test
+    fun slowRefreshDoesNotBlockSelectionOrRestoreDeletedSubscription() = runTest {
+        val url = "https://example.test/sub"
+        val key = "a".repeat(64)
+        val entry = LocationEntry.from("sub", LocationConfig("Sub", "room", key), subscriptionUrl = url)
+        val other = LocationEntry.from("other", LocationConfig("Other", "other-room", key))
+        val source = FakeLocationsDataSource(stored = LocationBundleV4(
+            activeLocationId = "sub", locations = listOf(entry, other)
+        ))
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val repository = LocationsRepositoryImpl(source, HttpClient(MockEngine {
+            started.complete(Unit)
+            finish.await()
+            respond("olcrtc://wbstream?vp8channel@new-room#$key")
+        }))
+        val refresh = async { repository.refreshSubscription(url) }
+        started.await()
+        withTimeout(1_000) {
+            repository.setActiveLocationId("other")
+            repository.deleteSubscription(url)
+        }
+        finish.complete(Unit)
+        assertEquals(0, refresh.await())
+        assertEquals("other", repository.getActiveLocationId())
+        assertEquals(listOf("other"), repository.getAllLocations().map { it.storageId })
     }
 
     @Test

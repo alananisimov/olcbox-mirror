@@ -501,7 +501,8 @@ class LocationViewModel(
         const val LOCATION_PING_ATTEMPTS = 1
         const val LOCATION_PING_TIMEOUT_MS = 12_000L
         const val LOCATION_PING_RETRY_DELAY_MS = 0L
-        const val LOCATION_PING_PARALLELISM = 4
+        // Finish each location check before starting the next one.
+        const val LOCATION_PING_PARALLELISM = 1
     }
 
     private data class ProviderDraft(

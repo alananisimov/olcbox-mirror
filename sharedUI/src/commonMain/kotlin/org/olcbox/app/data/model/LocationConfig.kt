@@ -322,6 +322,8 @@ data class LocationEndpointConfig(
 @Serializable
 data class SubscriptionMetadata(
     val name: String? = null,
+    val description: String? = null,
+    val comment: String? = null,
     val update: String? = null,
     val refresh: String? = null,
     val color: String? = null,
@@ -348,6 +350,8 @@ data class SubscriptionMetadata(
             ?: updateIntervalHours?.toLong()?.times(HOUR_MS)
         return copy(
             name = name.cleanMetadataValue(),
+            description = description.cleanMetadataValue(),
+            comment = comment.cleanMetadataValue(),
             update = update.cleanMetadataValue(),
             refresh = refresh.cleanMetadataValue(),
             color = color.cleanMetadataValue(),
@@ -367,6 +371,11 @@ data class SubscriptionMetadata(
             lastRefreshAtEpochMs = lastRefreshAtEpochMs?.takeIf { it > 0 },
             consecutiveRefreshFailures = consecutiveRefreshFailures.coerceIn(0, MAX_FAILURE_COUNT)
         )
+    }
+
+    fun displayDescription(): String? {
+        return description?.takeIf { it.isNotBlank() }
+            ?: comment?.takeIf { it.isNotBlank() }
     }
 
     fun effectiveUpdateIntervalMs(): Long {
@@ -390,6 +399,8 @@ data class SubscriptionMetadata(
 
     fun isEmpty(): Boolean {
         return name.isNullOrBlank() &&
+                description.isNullOrBlank() &&
+                comment.isNullOrBlank() &&
                 update.isNullOrBlank() &&
                 refresh.isNullOrBlank() &&
                 color.isNullOrBlank() &&
@@ -473,6 +484,7 @@ fun formatSubscriptionRefreshInterval(intervalMs: Long): String {
 @Serializable
 data class LocationMetadata(
     val name: String? = null,
+    val description: String? = null,
     val color: String? = null,
     val icon: String? = null,
     val used: String? = null,
@@ -488,6 +500,7 @@ data class LocationMetadata(
             ?.takeUnless { it.isEmpty() }
         return copy(
             name = name.cleanMetadataValue(),
+            description = description.cleanMetadataValue(),
             color = color.cleanMetadataValue(),
             icon = icon.cleanMetadataValue(),
             used = used.cleanMetadataValue(),
@@ -499,8 +512,14 @@ data class LocationMetadata(
         )
     }
 
+    fun displayDescription(): String? {
+        return description?.takeIf { it.isNotBlank() }
+            ?: comment?.takeIf { it.isNotBlank() }
+    }
+
     fun isEmpty(): Boolean {
         return name.isNullOrBlank() &&
+                description.isNullOrBlank() &&
                 color.isNullOrBlank() &&
                 icon.isNullOrBlank() &&
                 used.isNullOrBlank() &&

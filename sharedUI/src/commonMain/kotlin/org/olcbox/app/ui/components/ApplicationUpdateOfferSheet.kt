@@ -32,7 +32,8 @@ fun ApplicationUpdateOfferSheet(
     info: AppUpdateInfo,
     downloadProgress: Float?,
     onLater: () -> Unit,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    downloadLabel: String = "Download"
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -105,7 +106,7 @@ fun ApplicationUpdateOfferSheet(
                     modifier = Modifier.weight(1f),
                     enabled = downloadProgress == null
                 ) {
-                    Text("Download")
+                    Text(downloadLabel)
                 }
             }
         }

@@ -14,6 +14,7 @@ val buildOlcrtcAndroidAar by tasks.registering(Exec::class) {
     description = "Builds olcrtc Android AAR from OLCRTC_REPO using gomobile."
     inputs.dir(olcrtcRepoDir.resolve("mobile"))
     inputs.dir(olcrtcRepoDir.resolve("internal"))
+    inputs.dir(olcrtcRepoDir.resolve("pkg"))
     inputs.files(olcrtcRepoDir.resolve("go.mod"), olcrtcRepoDir.resolve("go.sum"))
     outputs.file(olcrtcAndroidAarFile)
 

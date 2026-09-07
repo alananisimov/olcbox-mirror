@@ -10,9 +10,6 @@ permissions:
 
 env:
   OLCBOX_VERSION_MAJOR_MINOR: "1.0"
-  # Pin release builds to a reviewed olcrtc commit so nightly rebuilds remain
-  # reproducible even when olcrtc master advances.
-  OLCBOX_OLCRTC_REF: "f616f57bb3a90740f1755922ffeaa7acc5cfe4ed"
   # The alananisimov/olcbox workflow was recreated after 1.0.69, so
   # github.run_number restarted. Run #6 must publish Android versionCode 70.
   OLCBOX_RELEASE_RUN_NUMBER_BASE: "5"
@@ -30,6 +27,12 @@ jobs:
       nightly_title: ${{ steps.version.outputs.nightly_title }}
 
     steps:
+      - name: Checkout olcbox
+        uses: actions/checkout@v7
+
+      - name: Read reviewed olcrtc revision
+        run: echo "OLCBOX_OLCRTC_REF=$(cat .github/olcrtc-revision)" >> "$GITHUB_ENV"
+
       - name: Resolve release version
         id: version
         run: |
@@ -66,8 +69,25 @@ jobs:
         id: core
         run: echo "sha=$(git -C olcrtc rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  build-windows:
+  verify-core:
     needs: release_version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout olcrtc
+        uses: actions/checkout@v7
+        with:
+          repository: alananisimov/olcrtc
+          ref: ${{ needs.release_version.outputs.olcrtc_sha }}
+          submodules: recursive
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.3'
+      - name: Test core lifecycle, transports and local end-to-end tunnels
+        run: go test -count=1 -race -timeout 15m ./...
+
+  build-windows:
+    needs: [release_version, verify-core]
     runs-on: windows-latest
     permissions:
       contents: read
@@ -102,7 +122,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Build Windows installers and portable zip
@@ -198,7 +218,7 @@ jobs:
             olcbox/dist/Olcbox-*-windows-amd64-portable.zip
 
   build-macos:
-    needs: release_version
+    needs: [release_version, verify-core]
     strategy:
       fail-fast: false
       matrix:
@@ -237,7 +257,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Build macOS DMG
@@ -259,7 +279,7 @@ jobs:
           path: olcbox/dist/Olcbox-*-macos-${{ matrix.arch }}.dmg
 
   build-linux:
-    needs: release_version
+    needs: [release_version, verify-core]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -295,7 +315,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup appimagetool
@@ -325,7 +345,7 @@ jobs:
           path: olcbox/dist/Olcbox-*-linux-amd64.AppImage
 
   build-android:
-    needs: release_version
+    needs: [release_version, verify-core]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -362,7 +382,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup Android SDK
@@ -370,7 +390,7 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;${ANDROID_NDK_VERSION}"
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;${ANDROID_NDK_VERSION}"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -473,7 +493,7 @@ jobs:
             olcbox/dist/Olcbox-*-android-armeabi-v7a-release.apk
 
   build-ios:
-    needs: release_version
+    needs: [release_version, verify-core]
     runs-on: macos-latest
     permissions:
       contents: read
@@ -510,7 +530,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup Gradle

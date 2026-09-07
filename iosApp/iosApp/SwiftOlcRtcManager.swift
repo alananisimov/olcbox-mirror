@@ -7,52 +7,76 @@ import UIKit
 
 final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
     private var logWriter: IosLogWriter?
-    private let runtime = MobileNew()!
+    private var runtime = MobileNew()!
+    private let logLock = NSLock()
+    private lazy var nativeLogWriter = NativeLogWriter { [weak self] in self?.log($0) }
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private let lock = NSLock()
     private let keepAlive = SilentAudioKeepAlive()
 
     func setLogWriter(writer: IosLogWriter?) {
-        lock.lock()
-        defer { lock.unlock() }
-
+        logLock.lock()
+        defer { logLock.unlock() }
         logWriter = writer
     }
 
     func start(request: IosOlcRtcStartRequest) -> IosBridgeResult {
         lock.lock()
-        defer { lock.unlock() }
-
+        let previous = runtime
+        let next = MobileNew()!
+        runtime = next
+        try? previous.stop(1)
+        DispatchQueue.global(qos: .utility).async { try? previous.stop(5_000) }
         do {
-            if runtime.isRunning() {
-                try runtime.stop(5_000)
-            }
-            try runtime.setProvider(request.carrierName)
-            try runtime.setTransport(request.transportName)
-            try runtime.setRoom(request.roomId)
-            try runtime.setKey(request.keyHex)
-            runtime.setDeviceID(request.clientId)
-            try runtime.setDNS(request.dnsServer)
-            try runtime.setSocksListenHost("127.0.0.1")
-            try runtime.setSocksPort(Int(request.socksPort))
-            try runtime.setSocksCredentials(request.socksUser, password: request.socksPass)
-            try runtime.setVP8Options(Int(request.vp8Fps), batchSize: Int(request.vp8BatchSize))
-            try runtime.start()
-            try runtime.waitReady(8_000)
+            next.setLogWriter(nativeLogWriter)
+            try next.setProvider(request.carrierName)
+            try next.setTransport(request.transportName)
+            try next.setRoom(request.roomId)
+            try next.setKey(request.keyHex)
+            next.setDeviceID(request.clientId)
+            try next.setDNS(request.dnsServer)
+            try next.setSocksListenHost("127.0.0.1")
+            try next.setSocksPort(Int(request.socksPort))
+            try next.setSocksCredentials(request.socksUser, password: request.socksPass)
+            try next.setVP8Options(Int(request.vp8Fps), batchSize: Int(request.vp8BatchSize))
+            try next.start()
         } catch {
-            try? runtime.stop(5_000)
-            endBackgroundTaskIfNeeded()
-            keepAlive.stop(log: makeLogger())
+            lock.unlock()
             return IosBridgeResult(success: false, message: error.localizedDescription)
         }
+        lock.unlock()
 
-        // Real background survival: the `audio` UIBackgroundMode only keeps the app
-        // alive while it is *actually producing audio*. Activating an AVAudioSession
-        // without output (the previous behaviour) let iOS suspend the process after
-        // the beginBackgroundTask grace period (~30s), which froze the Go runtime and
-        // killed the SOCKS/WebRTC transport. Playing a continuous (inaudible) buffer
-        // keeps the audio route active, so the SOCKS proxy keeps running in the
-        // background until the user stops it.
+        // Wait outside the lock: stop and a newer selection must be able to cancel us.
+        let deadline = ProcessInfo.processInfo.systemUptime + 60
+        do {
+            while true {
+                lock.lock()
+                let current = runtime === next
+                lock.unlock()
+                guard current else {
+                    return IosBridgeResult(success: false, message: "Connection cancelled")
+                }
+                do {
+                    try next.waitReady(200)
+                    break
+                } catch {
+                    if error.localizedDescription != "olcRTC runtime readiness timed out" ||
+                        ProcessInfo.processInfo.systemUptime >= deadline {
+                        throw error
+                    }
+                }
+            }
+        } catch {
+            lock.lock()
+            if runtime === next { stopLocked() }
+            lock.unlock()
+            return IosBridgeResult(success: false, message: error.localizedDescription)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard runtime === next else {
+            return IosBridgeResult(success: false, message: "Connection cancelled")
+        }
         keepAlive.start(log: makeLogger())
         beginBackgroundTaskIfNeeded()
         return IosBridgeResult(success: true, message: nil)
@@ -60,8 +84,15 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
 
     func stop() {
         lock.lock()
-        defer { lock.unlock() }
-        try? runtime.stop(5_000)
+        stopLocked()
+        lock.unlock()
+    }
+
+    private func stopLocked() {
+        let previous = runtime
+        runtime = MobileNew()!
+        try? previous.stop(1)
+        DispatchQueue.global(qos: .utility).async { try? previous.stop(5_000) }
         endBackgroundTaskIfNeeded()
         keepAlive.stop(log: makeLogger())
     }
@@ -69,7 +100,7 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
     func isRunning() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return runtime.isRunning()
+        return runtime.state() == "running"
     }
 
     func ping(request: IosOlcRtcCheckRequest) -> IosLongResult {
@@ -80,7 +111,7 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
 
         do {
             var value: Int64 = -1
-            try runtime.ping(
+            try MobileNew()!.ping(
                 request.carrierName,
                 transportName: request.transportName,
                 roomID: request.roomId,
@@ -107,7 +138,7 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
 
         do {
             var value: Int64 = -1
-            try runtime.check(
+            try MobileNew()!.check(
                 request.carrierName,
                 transportName: request.transportName,
                 roomID: request.roomId,
@@ -162,9 +193,9 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
     }
 
     private func log(_ message: String) {
-        lock.lock()
+        logLock.lock()
         let writer = logWriter
-        lock.unlock()
+        logLock.unlock()
         writer?.writeLog(message: message)
     }
 
@@ -188,13 +219,12 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
             } else if newTask != .invalid {
                 UIApplication.shared.endBackgroundTask(newTask)
             }
-            let writer = self.logWriter
             self.lock.unlock()
 
             if newTask == .invalid {
-                writer?.writeLog(message: "iOS background task unavailable; SOCKS pauses when the app is suspended")
+                self.log("iOS background task unavailable; SOCKS pauses when the app is suspended")
             } else {
-                writer?.writeLog(message: "iOS background task active; SOCKS can continue until the system suspends the app")
+                self.log("iOS background task active; SOCKS can continue until the system suspends the app")
             }
         }
     }
@@ -206,12 +236,11 @@ final class SwiftOlcRtcManager: NSObject, @unchecked Sendable, IosOlcRtcBridge {
             self.lock.lock()
             let task = self.backgroundTask
             self.backgroundTask = .invalid
-            let writer = self.logWriter
             self.lock.unlock()
 
             guard task != .invalid else { return }
             UIApplication.shared.endBackgroundTask(task)
-            writer?.writeLog(message: "iOS background task ended")
+            self.log("iOS background task ended")
         }
     }
 }
@@ -409,5 +438,15 @@ private final class SilentAudioKeepAlive: NSObject, @unchecked Sendable {
             guard self.running, self.engine?.isRunning != true else { return }
             self.restart(reason: "engine configuration change")
         }
+    }
+}
+
+private final class NativeLogWriter: NSObject, MobileLogWriterProtocol {
+    private let output: (String) -> Void
+
+    init(output: @escaping (String) -> Void) { self.output = output }
+
+    func writeLog(_ message: String?) {
+        if let message, !message.isEmpty { output(message) }
     }
 }

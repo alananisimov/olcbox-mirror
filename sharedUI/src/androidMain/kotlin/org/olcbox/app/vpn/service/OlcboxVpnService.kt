@@ -33,9 +33,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import mobile.LogWriter
 import mobile.Mobile
 import mobile.SocketProtector
 import org.olcbox.app.data.TUN2SOCKS_CONFIG_FILE_NAME
+import org.olcbox.app.vpn.awaitRuntimeReady
 import org.olcbox.app.data.datasource.LocationsDataSourceImpl
 import org.olcbox.app.data.datasource.LocationsRepositoryImpl
 import org.olcbox.app.data.identity.PersistentDeviceIdentityProvider
@@ -74,7 +76,9 @@ class OlcboxVpnService : VpnService() {
 
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Default + job)
-    private val olcRtcRuntime = Mobile.new_()
+    @Volatile private var olcRtcRuntime = Mobile.new_()
+    private var lastMobileRoom = ""
+    private var lastStoppedJitsiRoom = ""
     private val tunnelMutex = Mutex()
     private val repository: LocationsRepository by lazy {
         LocationsRepositoryImpl(LocationsDataSourceImpl(applicationContext))
@@ -303,6 +307,13 @@ class OlcboxVpnService : VpnService() {
             override fun protect(fd: Long): Boolean {
                 if (connectionMode == AndroidConnectionMode.Proxy) return true
                 return this@OlcboxVpnService.protect(fd.toInt())
+            }
+        })
+        olcRtcRuntime.setLogWriter(object : LogWriter {
+            override fun writeLog(msg: String) {
+                msg.lineSequence().filter { it.isNotBlank() }.forEach { line ->
+                    addLog("rtc: $line")
+                }
             }
         })
     }
@@ -575,23 +586,26 @@ class OlcboxVpnService : VpnService() {
             if (isLocalSocksPortOpen(targetSocksPort)) {
                 throw IllegalStateException("SOCKS port $targetSocksPort is still in use")
             }
-            waitForJitsiRoomCleanup(config.bypassProvider)
+            waitForJitsiRoomCleanup(config.bypassProvider, config.id)
             bindProcessToNetwork(upstream, "Bound to ${getNetName(upstream)}")
+            coroutineContext.ensureActive()
+            olcRtcRuntime = Mobile.new_()
+            installMobileCallbacks()
             configureMobileRuntime(config, deviceId, targetSocksPort)
             addLog(
                 "Starting olcRTC provider=${config.bypassProvider}, " +
                     "transport=${config.transport}, room=${config.id}"
             )
             lastMobileProvider = config.bypassProvider
+            lastMobileRoom = config.id
             olcRtcRuntime.start()
-            olcRtcRuntime.waitReady(MOBILE_READY_TIMEOUT_MS)
+            awaitRuntimeReady(MOBILE_READY_TIMEOUT_MS) { olcRtcRuntime.waitReady(it) }
             if (requestedGeneration != generation) {
                 addLog("olcRTC start superseded")
                 return false
             }
             coroutineContext.ensureActive()
             addLog("olcRTC ready on $socksListenHost:$targetSocksPort")
-            addLog("username: $socksUsername, password: $socksPassword")
             markRtcConnected()
             if (keepProcessBound) {
                 addLog("Keeping olcRTC bound to ${getNetName(upstream)}")
@@ -626,8 +640,9 @@ class OlcboxVpnService : VpnService() {
         }
     }
 
-    private suspend fun waitForJitsiRoomCleanup(provider: String) {
+    private suspend fun waitForJitsiRoomCleanup(provider: String, room: String) {
         if (LocationConfig.normalizeProvider(provider) != LocationConfig.PROVIDER_JITSI) return
+        if (room != lastStoppedJitsiRoom) return
 
         val waitMs = JITSI_RESTART_SETTLE_MS -
             (System.currentTimeMillis() - lastJitsiStopCompletedAtMs)
@@ -997,10 +1012,16 @@ class OlcboxVpnService : VpnService() {
     }
 
     private fun stopMobile() {
+        val runtime = olcRtcRuntime
         val provider = lastMobileProvider
-        val wasRunning = olcRtcRuntime.isRunning
-        runCatching { olcRtcRuntime.stop(MOBILE_STOP_TIMEOUT_MS) }
+        val room = lastMobileRoom
+        val wasRunning = runtime.isRunning
+        // Stop cancels synchronously. Provider teardown may finish later; it must not
+        // hold the UI or prevent a new Runtime from joining another room.
+        runCatching { runtime.stop(1L) }
+        if (wasRunning) scope.launch { runCatching { runtime.stop(MOBILE_STOP_TIMEOUT_MS) } }
         if (wasRunning && provider == LocationConfig.PROVIDER_JITSI) {
+            lastStoppedJitsiRoom = room
             lastJitsiStopCompletedAtMs = System.currentTimeMillis()
         }
     }
@@ -1671,7 +1692,7 @@ class OlcboxVpnService : VpnService() {
 
         private const val LOCAL_SOCKS_PORT_BASE = 10818
         private const val LOCAL_SOCKS_PORT_MAX = 10858
-        private const val MOBILE_READY_TIMEOUT_MS = 25_000L
+        private const val MOBILE_READY_TIMEOUT_MS = 60_000L
         private const val MOBILE_STOP_TIMEOUT_MS = 5_000L
         private const val PREVIOUS_STOP_WAIT_MS = 12_000L
         private const val JITSI_RESTART_SETTLE_MS = 2_000L

@@ -7,21 +7,23 @@ import android.os.Build
 import android.provider.Settings
 import android.net.Uri
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.olcbox.app.data.datasource.withProxyAuthentication
 import org.olcbox.app.data.repository.SubscriptionFetchProxy
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
-import java.net.URL
 
 class AndroidUpdateInstaller(
     context: Context,
     private val proxyProvider: () -> SubscriptionFetchProxy? = { null }
 ) {
     private val appContext = context.applicationContext
+    private val downloads = UpdateDownloadCache(File(appContext.cacheDir, "updates"))
+
+    fun downloadedFile(asset: AppUpdateAsset): File? = downloads.downloadedFile(asset)
 
     fun canRequestPackageInstalls(): Boolean {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
@@ -97,53 +99,20 @@ class AndroidUpdateInstaller(
         )
     }
 
-    suspend fun download(asset: AppUpdateAsset, onProgress: (Float) -> Unit): Result<File> = runCatching {
-        val proxy = proxyProvider()
-        withProxyAuthentication(proxy) {
-            downloadFile(asset, onProgress, proxy)
+    suspend fun download(asset: AppUpdateAsset, onProgress: (Float) -> Unit): Result<File> {
+        return try {
+            val proxy = proxyProvider()
+            Result.success(withProxyAuthentication(proxy) {
+                val connectionProxy = proxy?.let {
+                    Proxy(Proxy.Type.SOCKS, InetSocketAddress(it.host, it.port))
+                } ?: Proxy.NO_PROXY
+                downloads.download(asset, connectionProxy) { reportProgress(it, onProgress) }
+            })
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Result.failure(error)
         }
-    }
-
-    private suspend fun downloadFile(
-        asset: AppUpdateAsset,
-        onProgress: (Float) -> Unit,
-        proxy: SubscriptionFetchProxy?
-    ): File = withContext(Dispatchers.IO) {
-        val directory = File(appContext.cacheDir, "updates").apply {
-            mkdirs()
-        }
-        val fileName = asset.name.substringAfterLast('/').ifBlank { "olcbox-update.apk" }
-        val target = File(directory, fileName)
-        val connection = if (proxy == null) {
-            URL(asset.downloadUrl).openConnection()
-        } else {
-            URL(asset.downloadUrl).openConnection(
-                Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxy.host, proxy.port))
-            )
-        } as HttpURLConnection
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 60_000
-        val total = connection.contentLengthLong.takeIf { it > 0L } ?: asset.sizeBytes ?: -1L
-        connection.inputStream.use { input ->
-            target.outputStream().use { output ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                var copied = 0L
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    output.write(buffer, 0, read)
-                    copied += read
-                    if (total > 0L) {
-                        reportProgress(
-                            (copied.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f),
-                            onProgress
-                        )
-                    }
-                }
-            }
-        }
-        reportProgress(1f, onProgress)
-        target
     }
 
     private suspend fun reportProgress(progress: Float, onProgress: (Float) -> Unit) {

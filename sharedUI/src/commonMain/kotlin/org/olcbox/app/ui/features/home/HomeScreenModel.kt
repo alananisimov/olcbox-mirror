@@ -362,15 +362,22 @@ class HomeScreenViewModel(
 
     fun refreshSubscription(
         subscriptionUrl: String,
+        onError: (message: String) -> Unit = {},
         onComplete: (updatedCount: Int) -> Unit = {}
     ) {
         viewModelScope.launch {
-            val updatedCount = locationsRepository.refreshSubscription(
-                subscriptionUrl = subscriptionUrl,
-                subscriptionProxy = vpnManager.subscriptionFetchProxy()
-            )
-            loadCurrentConfigNow()
-            onComplete(updatedCount)
+            try {
+                val updatedCount = locationsRepository.refreshSubscription(
+                    subscriptionUrl = subscriptionUrl,
+                    subscriptionProxy = vpnManager.subscriptionFetchProxy()
+                )
+                loadCurrentConfigNow()
+                onComplete(updatedCount)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                onError(error.message ?: "Subscription update failed")
+            }
         }
     }
 

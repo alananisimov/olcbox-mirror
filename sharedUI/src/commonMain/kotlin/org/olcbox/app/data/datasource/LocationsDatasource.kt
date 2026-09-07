@@ -246,175 +246,79 @@ class LocationsRepositoryImpl(
         )
     }
 
-    override suspend fun refreshSubscriptions(subscriptionProxy: SubscriptionFetchProxy?): Int {
-        return mutationMutex.withLock {
-            refreshSubscriptionsUnlocked(
-                onlyUrls = null,
-                subscriptionProxy = subscriptionProxy
-            )
-        }
-    }
+    override suspend fun refreshSubscriptions(subscriptionProxy: SubscriptionFetchProxy?): Int =
+        refreshSubscriptionsMatching(null, subscriptionProxy)
 
     override suspend fun refreshSubscription(
         subscriptionUrl: String,
         subscriptionProxy: SubscriptionFetchProxy?
     ): Int {
-        val normalizedUrl = subscriptionUrl.trim()
-        if (normalizedUrl.isBlank()) return 0
-        return mutationMutex.withLock {
-            refreshSubscriptionsUnlocked(
-                onlyUrls = setOf(normalizedUrl),
-                subscriptionProxy = subscriptionProxy
-            )
-        }
+        val url = subscriptionUrl.trim()
+        if (url.isBlank()) return 0
+        return refreshSubscriptionsMatching(setOf(url), subscriptionProxy)
     }
 
-    private suspend fun refreshSubscriptionsUnlocked(
+    private suspend fun refreshSubscriptionsMatching(
         onlyUrls: Set<String>?,
         subscriptionProxy: SubscriptionFetchProxy?
     ): Int {
-        val bundle = getBundleUnlocked()
-        if (bundle.locations.isEmpty()) return 0
-
-        val groupedByUrl = bundle.locations
-            .mapNotNull { entry -> entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() }?.let { it to entry } }
-            .groupBy({ it.first }, { it.second })
-            .filterKeys { url -> onlyUrls == null || url in onlyUrls }
-        if (groupedByUrl.isEmpty()) return 0
-
-        val targetUrls = groupedByUrl.keys
-        val refreshedLocations = bundle.locations
-            .filter { entry ->
-                val url = entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() }
-                url == null || (onlyUrls != null && url !in targetUrls)
-            }
-            .toMutableList()
-        val usedStorageIds = refreshedLocations.mapTo(mutableSetOf()) { it.storageId }
-        val activeBefore = bundle.activeLocationId
-        var activeAfter = activeBefore
-        var successfulRefreshes = 0
-        var attemptedRefreshes = 0
-
-        fun preservePreviousEntries(entries: List<LocationEntry>, failedAtEpochMs: Long? = null) {
-            entries.forEach { entry ->
-                if (usedStorageIds.add(entry.storageId)) {
-                    refreshedLocations += if (failedAtEpochMs == null) {
-                        entry
-                    } else {
-                        entry.copy(
-                            metadata = entry.metadata.withSubscriptionRefreshFailure(failedAtEpochMs)
-                        ).normalized()
-                    }
-                }
-            }
-        }
-
-        groupedByUrl.forEach { (url, previousEntries) ->
-            attemptedRefreshes += 1
-            val refreshTimestamp = nowEpochMs()
-            val previousInterval = previousEntries.subscriptionUpdateIntervalMs()
-            val allowInsecureRequests = previousEntries.any {
-                it.metadata?.subscription?.allowInsecureRequests == true
-            } ||
-                url.startsWith("http://", ignoreCase = true)
+        val groups = getBundle().locations
+            .filter { !it.subscriptionUrl.isNullOrBlank() }
+            .groupBy { it.subscriptionUrl!!.trim() }
+            .filterKeys { onlyUrls == null || it in onlyUrls }
+        var successful = 0
+        for ((url, snapshot) in groups) {
+            // Network I/O must not hold the storage lock: users can select or delete
+            // locations while a subscription server is unreachable.
+            val timestamp = nowEpochMs()
             val resolved = resolveParsedImport(
                 text = url,
-                fallbackSubscriptionInterval = previousInterval,
+                fallbackSubscriptionInterval = snapshot.subscriptionUpdateIntervalMs(),
                 subscriptionProxy = subscriptionProxy,
-                allowInsecureRequests = allowInsecureRequests
-            ) ?: run {
-                preservePreviousEntries(previousEntries, refreshTimestamp)
-                return@forEach
-            }
-            val source = resolved.source
-            val refreshed = resolved.parsed.bundle.locations
-            val updateInterval = source.updateIntervalMs
-                ?: refreshed.firstNotNullOfOrNull {
-                    it.metadata?.subscription?.updateIntervalMs
-                }
-                ?: previousInterval
-                ?: SubscriptionMetadata.DEFAULT_UPDATE_INTERVAL_MS
-            val manualInterval = previousEntries.firstNotNullOfOrNull {
-                it.metadata?.subscription?.manualUpdateIntervalMs
-            }
-            if (refreshed.isEmpty()) {
-                preservePreviousEntries(previousEntries, refreshTimestamp)
-                return@forEach
-            }
-
-            val reusedBySignature = previousEntries
-                .groupBy { subscriptionSignature(it.location) }
-                .mapValues { (_, entries) -> entries.toMutableList() }
-
-            val reassigned = refreshed.mapIndexed { index, entry ->
-                val signature = subscriptionSignature(entry.location)
-                val reusedPool = reusedBySignature[signature]
-                val reusedEntry = if (reusedPool.isNullOrEmpty()) null else reusedPool.removeAt(0)
-                val storageId = reusedEntry?.storageId ?: uniqueStorageId(
-                    base = "imported_${entry.location.storageSlug().ifBlank { "location_${index + 1}" }}",
-                    used = usedStorageIds
-                )
-                if (activeBefore == reusedEntry?.storageId) {
-                    activeAfter = storageId
-                }
-                entry.copy(
-                    storageId = storageId,
-                    subscriptionUrl = url,
-                    dnsServer = entry.location.dnsServer
-                        .ifBlank { reusedEntry?.location?.dnsServer.orEmpty() }
-                        .takeIf { it.isNotBlank() },
-                    metadata = entry.metadata.withSubscriptionRefreshState(
-                        updateIntervalMs = updateInterval,
-                        manualUpdateIntervalMs = manualInterval,
-                        lastRefreshAttemptAtEpochMs = refreshTimestamp,
-                        lastRefreshAtEpochMs = refreshTimestamp,
-                        consecutiveRefreshFailures = 0
-                    )
-                ).normalized()
-            }
-
-            if (activeBefore != null &&
-                activeAfter == activeBefore &&
-                previousEntries.any { it.storageId == activeBefore }
-            ) {
-                activeAfter = reassigned.firstOrNull()?.storageId
-            }
-            refreshedLocations += reassigned
-            successfulRefreshes += 1
-        }
-
-        if (attemptedRefreshes == 0) return 0
-
-        saveBundleUnlocked(
-            bundle.copy(
-                activeLocationId = activeAfter,
-                locations = refreshedLocations
+                allowInsecureRequests = snapshot.any {
+                    it.metadata?.subscription?.allowInsecureRequests == true
+                } || url.startsWith("http://", ignoreCase = true)
             )
-        )
-        return successfulRefreshes
+            mutationMutex.withLock {
+                val current = getBundleUnlocked()
+                val previous = current.locations.filter { it.subscriptionUrl?.trim() == url }
+                if (previous.isEmpty()) return@withLock // Deleted while the request was in flight.
+                val refreshed = resolved?.parsed?.bundle?.locations.orEmpty()
+                if (refreshed.isEmpty()) {
+                    saveBundleUnlocked(current.copy(locations = current.locations.map { entry ->
+                        if (entry.subscriptionUrl?.trim() != url) entry else entry.copy(
+                            metadata = entry.metadata.withSubscriptionRefreshFailure(timestamp)
+                        )
+                    }))
+                    return@withLock
+                }
+                val interval = resolved?.source?.updateIntervalMs
+                    ?: refreshed.firstNotNullOfOrNull { it.metadata?.subscription?.updateIntervalMs }
+                    ?: previous.subscriptionUpdateIntervalMs()
+                    ?: SubscriptionMetadata.DEFAULT_UPDATE_INTERVAL_MS
+                val imported = LocationBundleV4(locations = refreshed.map { entry ->
+                    entry.copy(metadata = entry.metadata.withSubscriptionRefreshState(
+                        updateIntervalMs = interval,
+                        manualUpdateIntervalMs = null,
+                        lastRefreshAttemptAtEpochMs = timestamp,
+                        lastRefreshAtEpochMs = timestamp,
+                        consecutiveRefreshFailures = 0
+                    ))
+                })
+                saveBundleUnlocked(mergeImportedSubscription(current, imported, url))
+                successful++
+            }
+        }
+        return successful
     }
 
     override suspend fun refreshDueSubscriptions(subscriptionProxy: SubscriptionFetchProxy?): Int {
-        return mutationMutex.withLock {
-            val bundle = getBundleUnlocked()
-            val now = nowEpochMs()
-            val dueUrls = bundle.locations
-                .mapNotNull { entry ->
-                    val url = entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    val nextRefreshAt = entry.metadata?.subscription?.nextRefreshAtEpochMs() ?: 0L
-                    url.takeIf { nextRefreshAt <= now }
-                }
-                .toSet()
-
-            if (dueUrls.isEmpty()) {
-                0
-            } else {
-                refreshSubscriptionsUnlocked(
-                    onlyUrls = dueUrls,
-                    subscriptionProxy = subscriptionProxy
-                )
-            }
-        }
+        val now = nowEpochMs()
+        val urls = getBundle().locations.mapNotNull { entry ->
+            val url = entry.subscriptionUrl?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            url.takeIf { (entry.metadata?.subscription?.nextRefreshAtEpochMs() ?: 0L) <= now }
+        }.toSet()
+        return if (urls.isEmpty()) 0 else refreshSubscriptionsMatching(urls, subscriptionProxy)
     }
 
     override suspend fun nextSubscriptionRefreshAtEpochMs(): Long? {
@@ -1000,7 +904,7 @@ class LocationsRepositoryImpl(
         val remainingEntries = currentBundle.locations.filterNot {
             it.subscriptionUrl?.trim() == normalizedUrl
         }
-        val usedStorageIds = remainingEntries.mapTo(mutableSetOf()) { it.storageId }
+        val usedStorageIds = currentBundle.locations.mapTo(mutableSetOf()) { it.storageId }
         val previousBySignature = previousEntries
             .groupBy { subscriptionSignature(it.location) }
             .mapValues { (_, entries) -> entries.toMutableList() }
@@ -1329,6 +1233,8 @@ class LocationsRepositoryImpl(
     private fun buildSubscriptionMetadata(fields: Map<String, String>): SubscriptionMetadata? {
         return SubscriptionMetadata(
             name = fields["name"],
+            description = fields["description"],
+            comment = fields["comment"],
             update = fields["update"],
             refresh = fields["refresh"],
             color = fields["color"],
@@ -1346,6 +1252,7 @@ class LocationsRepositoryImpl(
     ): LocationMetadata? {
         return LocationMetadata(
             name = fields["name"],
+            description = fields["description"],
             color = fields["color"],
             icon = fields["icon"],
             used = fields["used"],

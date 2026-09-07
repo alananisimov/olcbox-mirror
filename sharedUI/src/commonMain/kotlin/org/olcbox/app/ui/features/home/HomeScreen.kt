@@ -67,6 +67,7 @@ fun HomeScreen(
     var manualImportText by remember { mutableStateOf("") }
     var manualSubscriptionRefresh by remember { mutableStateOf("") }
     var manualSubscriptionAllowInsecure by remember { mutableStateOf(false) }
+    var updatingSubscriptionUrl by remember { mutableStateOf<String?>(null) }
 
     val state by viewModel.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -111,6 +112,35 @@ fun HomeScreen(
             performPing = { config ->
                 viewModel.performPingFor(config)
             },
+        )
+    }
+
+    fun updateSubscription(subscriptionUrl: String) {
+        if (updatingSubscriptionUrl != null) return
+        updatingSubscriptionUrl = subscriptionUrl
+        viewModel.refreshSubscription(
+            subscriptionUrl = subscriptionUrl,
+            onComplete = { updatedCount ->
+                locationViewModel.loadLocations {
+                    viewModel.restartVpnIfRunning()
+                    updatingSubscriptionUrl = null
+                    scope.launch {
+                        snackbarHostState.showSnackbar(
+                            if (updatedCount > 0) {
+                                "Subscription updated"
+                            } else {
+                                "Subscription is already up to date"
+                            }
+                        )
+                    }
+                }
+            },
+            onError = { message ->
+                updatingSubscriptionUrl = null
+                scope.launch {
+                    snackbarHostState.showSnackbar("Could not update subscription: $message")
+                }
+            }
         )
     }
 
@@ -165,6 +195,8 @@ fun HomeScreen(
                 onRefreshClick = { targetIds ->
                     refreshHttpPings(targetIds)
                 },
+                onSubscriptionUpdateClick = ::updateSubscription,
+                updatingSubscriptionUrl = updatingSubscriptionUrl,
                 onAddSubscriptionClick = {
                     isAddSheetOpen = true
                 },

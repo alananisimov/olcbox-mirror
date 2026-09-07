@@ -78,14 +78,16 @@ val buildOlcrtcIosXcframework by tasks.registering(Exec::class) {
 
     inputs.dir(olcrtcRepoDir.resolve("mobile"))
     inputs.dir(olcrtcRepoDir.resolve("internal"))
+    inputs.dir(olcrtcRepoDir.resolve("pkg"))
     inputs.files(olcrtcRepoDir.resolve("go.mod"), olcrtcRepoDir.resolve("go.sum"))
-    outputs.dir(olcrtcIosXcframework)
+    val frameworkDir = olcrtcIosXcframeworkDir
+    outputs.dir(frameworkDir)
 
     workingDir = olcrtcRepoDir
 
     doFirst {
-        delete(olcrtcIosXcframeworkDir)
-        olcrtcIosXcframeworkDir.parentFile.mkdirs()
+        frameworkDir.deleteRecursively()
+        frameworkDir.parentFile.mkdirs()
     }
 
     commandLine(
@@ -122,6 +124,12 @@ kotlin {
     iosSimulatorArm64()
 
     sourceSets {
+        androidMain {
+            kotlin.srcDir("src/jvmAndAndroidMain/kotlin")
+        }
+        jvmMain {
+            kotlin.srcDir("src/jvmAndAndroidMain/kotlin")
+        }
         commonMain {
             kotlin.srcDir(generateAppInfo)
         }

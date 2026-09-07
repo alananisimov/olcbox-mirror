@@ -33,7 +33,7 @@ class IosVpnManager(
     private val olcRtcBridge: IosOlcRtcBridge
 ) : VpnManager {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mutex = Mutex()
 
     private val _logs = MutableStateFlow<List<String>>(emptyList())
@@ -70,7 +70,6 @@ class IosVpnManager(
                     .takeIf { it.isNotBlank() }
                     ?.let {
                         addLog("rtc: $it")
-                        handleRtcLine(it)
                     }
             }
         })
@@ -79,9 +78,14 @@ class IosVpnManager(
     override fun needsPermission(): Boolean = false
 
     override fun startVpn() {
+        watchdogJob?.cancel()
         desiredConnected = true
         reconnectAttempt = 0
         reconnectJob?.cancel()
+        operationJob?.cancel()
+        // The bridge cancels synchronously and performs provider teardown in the background.
+        // Do this before acquiring mutex: the old start may still be waiting for readiness.
+        olcRtcBridge.stop()
         val requestedGeneration = ++generation
         operationJob = scope.launch {
             mutex.withLock {
@@ -108,7 +112,9 @@ class IosVpnManager(
         desiredConnected = false
         watchdogJob?.cancel()
         reconnectJob?.cancel()
+        operationJob?.cancel()
         generation++
+        olcRtcBridge.stop()
         operationJob = scope.launch {
             mutex.withLock {
                 setStatus(VpnStatus.Stopping)

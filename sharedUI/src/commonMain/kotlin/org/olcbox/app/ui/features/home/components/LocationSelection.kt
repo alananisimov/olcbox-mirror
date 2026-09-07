@@ -15,7 +15,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -30,15 +32,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.olcbox.app.data.model.parseTrafficQuota
 import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.ui.features.locations.PingsState
 import org.olcbox.app.ui.features.locations.components.LocationRow
 import org.olcbox.app.ui.features.locations.components.RefreshButton
+import org.olcbox.app.ui.components.TrafficQuotaIndicator
 
 @Composable
 fun LocationSelectorScreen(
     modifier: Modifier = Modifier,
     onRefreshClick: (targetLocationIds: List<String>) -> Unit,
+    onSubscriptionUpdateClick: (subscriptionUrl: String) -> Unit,
+    updatingSubscriptionUrl: String?,
     onAddSubscriptionClick: () -> Unit,
     onAddLocationClick: () -> Unit,
     locations: List<LocationItem>,
@@ -64,7 +70,7 @@ fun LocationSelectorScreen(
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            subscriptionGroups.forEachIndexed { index, group ->
+            subscriptionGroups.forEach { group ->
                 Column(
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -82,14 +88,39 @@ fun LocationSelectorScreen(
                         val isGroupRefreshing = pingsState is PingsState.Loading &&
                                 pingsState.pendingLocationIds.any { it in groupIds }
 
-                        RefreshButton(
-                            isRefreshing = isGroupRefreshing,
-                            onClick = { onRefreshClick(groupIds) },
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            RefreshButton(
+                                isRefreshing = isGroupRefreshing,
+                                onClick = { onRefreshClick(groupIds) },
+                                tint = MaterialTheme.colorScheme.primary,
+                                label = "Ping",
+                                icon = Icons.Outlined.Bolt,
+                                enabled = updatingSubscriptionUrl == null
+                            )
+
+                            group.firstOrNull()
+                                ?.subscriptionUrl
+                                ?.trim()
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { subscriptionUrl ->
+                                    RefreshButton(
+                                        isRefreshing = updatingSubscriptionUrl == subscriptionUrl,
+                                        onClick = { onSubscriptionUpdateClick(subscriptionUrl) },
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        label = "Update",
+                                        icon = Icons.Outlined.Refresh,
+                                        enabled = updatingSubscriptionUrl == null && !isGroupRefreshing
+                                    )
+                                }
+                        }
                     }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+                    val subscription = group.firstOrNull()?.metadata?.subscription
+                    TrafficQuotaIndicator(
+                        used = subscription?.used,
+                        available = subscription?.available,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp)
+                    )
 
                     Column(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -129,7 +160,9 @@ fun LocationSelectorScreen(
                         RefreshButton(
                             isRefreshing = isCustomRefreshing,
                             onClick = { onRefreshClick(customIds) },
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = MaterialTheme.colorScheme.primary,
+                            label = "Ping",
+                            icon = Icons.Outlined.Bolt
                         )
                     }
 
@@ -322,6 +355,7 @@ private fun SubscriptionGroupHeader(
 ) {
     val first = locations.firstOrNull()
     val title = first?.subscriptionTitle().orEmpty().ifBlank { "Subscriptions" }
+    val description = first?.subscriptionDescription()
     val details = first?.subscriptionDetails()
 
     Column(modifier = modifier.padding(start = 4.dp, top = 2.dp)) {
@@ -329,8 +363,20 @@ private fun SubscriptionGroupHeader(
             text = title,
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurface,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
+
+        if (!description.isNullOrBlank()) {
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
 
         if (!details.isNullOrBlank()) {
             Text(
@@ -430,11 +476,17 @@ private fun LocationItem.subscriptionTitle(): String {
 
 private fun LocationItem.subscriptionDetails(): String? {
     val subscription = metadata?.subscription ?: return null
+    val hasProgressQuota = parseTrafficQuota(subscription.used, subscription.available) != null
 
     return listOfNotNull(
-        quotaText(subscription.used, subscription.available),
+        quotaText(subscription.used, subscription.available).takeUnless { hasProgressQuota },
         subscription.refresh?.takeIf { it.isNotBlank() }?.let { "Refresh $it" }
     ).joinToString(" · ").takeIf { it.isNotBlank() }
+}
+
+private fun LocationItem.subscriptionDescription(): String? {
+    val subscription = metadata?.subscription ?: return null
+    return subscription.displayDescription()
 }
 
 private fun quotaText(used: String?, available: String?): String? {

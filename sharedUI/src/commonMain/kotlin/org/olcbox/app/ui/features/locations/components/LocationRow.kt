@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -44,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.olcbox.app.data.model.LocationConfig
+import org.olcbox.app.data.model.parseTrafficQuota
+import org.olcbox.app.ui.components.TrafficQuotaIndicator
 import org.olcbox.app.ui.features.locations.LocationItem
 import org.olcbox.app.util.parseEmojiAndName
 
@@ -85,12 +88,13 @@ fun LocationRow(
         ?: ""
     val (emoji, parsedName) = parseEmojiAndName(rawName, fallbackIcon)
     val cleanName = parsedName.ifBlank { location.config?.displayName().orEmpty() }
+    val description = metadata?.displayDescription()
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .height(76.dp)
+            .heightIn(min = 76.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(bgColor)
             .border(borderWidth, borderColor, RoundedCornerShape(16.dp))
@@ -100,7 +104,7 @@ fun LocationRow(
                     if (settingsEnabled) onSettingsClick()
                 }
             )
-            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
         if (emoji.isNotEmpty()) {
             Text(text = emoji, fontSize = 20.sp)
@@ -112,8 +116,20 @@ fun LocationRow(
                 text = cleanName,
                 color = textColor,
                 fontSize = 16.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+
+            if (!description.isNullOrBlank()) {
+                Text(
+                    text = description,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
             Text(
                 text = locationSubtitle(location),
@@ -121,6 +137,13 @@ fun LocationRow(
                 fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
+            )
+
+            TrafficQuotaIndicator(
+                used = metadata?.used,
+                available = metadata?.available,
+                modifier = Modifier.padding(top = 6.dp),
+                compact = true
             )
         }
         
@@ -180,9 +203,9 @@ private fun locationSubtitle(location: LocationItem): String {
     return listOfNotNull(
         providerName,
         transportName,
-        metadata?.comment?.takeIf { it.isNotBlank() },
         metadata?.ip?.takeIf { it.isNotBlank() }?.let { "IP $it" },
         quotaText(metadata?.used, metadata?.available)
+            .takeUnless { parseTrafficQuota(metadata?.used, metadata?.available) != null }
     ).joinToString(" · ")
 }
 

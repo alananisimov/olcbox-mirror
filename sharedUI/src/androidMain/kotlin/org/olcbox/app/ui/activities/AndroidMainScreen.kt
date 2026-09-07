@@ -27,7 +27,6 @@ import org.olcbox.app.update.AppUpdateSettings
 import org.olcbox.app.update.AppUpdateService
 import org.olcbox.app.update.AndroidUpdateInstaller
 import org.olcbox.app.update.identity
-import org.olcbox.app.update.isDownloaded
 import org.olcbox.app.update.isUpdateCheckDue
 import org.olcbox.app.update.shouldShowOffer
 import org.olcbox.app.ui.OlcboxAppContent
@@ -162,10 +161,7 @@ fun AndroidMainScreen(
     }
 
     fun showUpdateResult(info: AppUpdateInfo) {
-        if (info.isDownloaded(updateSettings)) {
-            updateOffer = null
-            updateStatusText = "Latest ${info.channel.name.lowercase()} is already downloaded"
-        } else if (info.isUpdateAvailable) {
+        if (info.isUpdateAvailable) {
             updateOffer = info
             updateStatusText = "${info.channel.name} update available: ${info.version}"
         } else {
@@ -210,6 +206,7 @@ fun AndroidMainScreen(
     }
 
     fun downloadUpdate(info: AppUpdateInfo) {
+        if (updateDownloadProgress != null) return
         scope.launch {
             if (!updateInstaller.canRequestPackageInstalls()) {
                 updateInstaller.openUnknownSourcesSettings()
@@ -239,7 +236,12 @@ fun AndroidMainScreen(
             updateOffer = null
             updateDownloadProgress = null
             relaunchAfterInstall = true
-            updateInstallLauncher.launch(updateInstaller.installIntent(file))
+            runCatching { updateInstallLauncher.launch(updateInstaller.installIntent(file)) }
+                .onFailure {
+                    relaunchAfterInstall = false
+                    updateOffer = info
+                    updateStatusText = "Could not open installer: ${it.message}"
+                }
         }
     }
 
@@ -407,7 +409,8 @@ fun AndroidMainScreen(
             info = info,
             downloadProgress = updateDownloadProgress,
             onLater = { postponeUpdate(info) },
-            onDownload = { downloadUpdate(info) }
+            onDownload = { downloadUpdate(info) },
+            downloadLabel = if (updateInstaller.downloadedFile(info.asset) != null) "Install" else "Download"
         )
     }
 

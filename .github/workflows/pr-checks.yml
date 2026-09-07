@@ -26,11 +26,16 @@ jobs:
         with:
           path: olcbox
 
+      - name: Read reviewed olcrtc revision
+        id: core
+        shell: bash
+        run: echo "sha=$(cat olcbox/.github/olcrtc-revision)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout olcrtc
         uses: actions/checkout@v7
         with:
-          repository: openlibrecommunity/olcrtc
-          ref: master
+          repository: alananisimov/olcrtc
+          ref: ${{ steps.core.outputs.sha }}
           path: olcrtc
           submodules: recursive
 
@@ -43,7 +48,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 'stable'
+          go-version: '1.26.3'
           cache-dependency-path: olcrtc/go.sum
 
       - name: Setup Android SDK
@@ -51,7 +56,7 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;${ANDROID_NDK_VERSION}"
+          sdkmanager "platforms;android-37" "build-tools;37.0.0" "ndk;${ANDROID_NDK_VERSION}"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
@@ -68,6 +73,10 @@ jobs:
           export ANDROID_NDK_HOME="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
           export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
           gomobile init
+
+      - name: Test olcrtc
+        working-directory: olcrtc
+        run: go test -count=1 -race -timeout 15m ./...
 
       - name: Run checks
         working-directory: olcbox
